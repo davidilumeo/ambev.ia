@@ -22,6 +22,60 @@ X_QUESTIONS = [
 ]
 
 # ----------------------------
+# Helpers (ordem e nome automático)
+# ----------------------------
+def _title_from_text(text: str, max_len: int = 28) -> str:
+    t = " ".join((text or "").strip().split())
+    if not t:
+        return "Novo chat"
+    t = t[:max_len].strip()
+    return t
+
+def _unique_chat_name(base: str) -> str:
+    name = base
+    i = 2
+    while name in st.session_state.chats:
+        name = f"{base} ({i})"
+        i += 1
+    return name
+
+def bump_chat_to_top(chat_name: str):
+    if "chat_order" not in st.session_state:
+        st.session_state.chat_order = list(st.session_state.chats.keys())
+    if chat_name in st.session_state.chat_order:
+        st.session_state.chat_order.remove(chat_name)
+    st.session_state.chat_order.insert(0, chat_name)
+
+def rename_chat(old, new):
+    new = (new or "").strip()
+    if not new:
+        return
+    if new in st.session_state.chats:
+        return
+
+    st.session_state.chats[new] = st.session_state.chats.pop(old)
+
+    if "chat_order" in st.session_state and old in st.session_state.chat_order:
+        idx = st.session_state.chat_order.index(old)
+        st.session_state.chat_order[idx] = new
+
+    st.session_state.active_chat = new
+
+def maybe_autoname_chat(chat_name: str, user_text: str) -> str:
+    is_generic = chat_name == "Novo chat" or chat_name.startswith("Chat ")
+    if not is_generic:
+        return chat_name
+
+    base = _title_from_text(user_text)
+    new_name = _unique_chat_name(base)
+
+    if new_name != chat_name:
+        rename_chat(chat_name, new_name)
+        return new_name
+
+    return chat_name
+
+# ----------------------------
 # CSS (estilo ChatGPT-like)
 # ----------------------------
 st.markdown(
@@ -135,6 +189,12 @@ st.markdown(
 
     #MainMenu { visibility: hidden; }
     footer { visibility: hidden; }
+
+    /* ===== Ocultar toolbar/header do Streamlit (Share etc.) ===== */
+    div[data-testid="stToolbar"] { display: none !important; }
+    div[data-testid="stToolbarActions"] { display: none !important; }
+    .stAppToolbar { display: none !important; }
+    header[data-testid="stHeader"] { display: none !important; }
     </style>
     """,
     unsafe_allow_html=True
@@ -150,6 +210,10 @@ if "chats" not in st.session_state:
         ]
     }
     st.session_state.active_chat = "Novo chat"
+    st.session_state.chat_order = ["Novo chat"]
+
+if "chat_order" not in st.session_state:
+    st.session_state.chat_order = list(st.session_state.chats.keys())
 
 if "sidebar_section" not in st.session_state:
     st.session_state.sidebar_section = "chats"  # "chats" ou "x"
@@ -158,22 +222,15 @@ if "pending_user_message" not in st.session_state:
     st.session_state.pending_user_message = ""
 
 def new_chat():
-    name = f"Chat {len(st.session_state.chats)+1}"
+    name = _unique_chat_name(f"Chat {len(st.session_state.chats)+1}")
     st.session_state.chats[name] = [
         {"role": "assistant", "content": "Começamos uma novo chat. Como posso ajudar?"}
     ]
     st.session_state.active_chat = name
-
-def rename_chat(old, new):
-    if not new or new.strip() == "":
-        return
-    if new in st.session_state.chats:
-        return
-    st.session_state.chats[new] = st.session_state.chats.pop(old)
-    st.session_state.active_chat = new
+    bump_chat_to_top(name)
 
 # ----------------------------
-# Sidebar (menu fixo + chats)
+# Sidebar (menu fixo + chats / X)
 # ----------------------------
 with st.sidebar:
     # Menu fixo
@@ -183,9 +240,9 @@ with st.sidebar:
         st.button("➕ Novo chat", use_container_width=True, on_click=new_chat)
 
         st.markdown("---")
-        for chat_name in list(st.session_state.chats.keys()):
+        for chat_name in st.session_state.chat_order:
             is_active = (chat_name == st.session_state.active_chat)
-            label = f"👉 {chat_name}" if is_active else chat_name
+            label = f"{chat_name}" if is_active else chat_name
 
             if st.button(label, key=f"chat_{chat_name}", use_container_width=True):
                 st.session_state.active_chat = chat_name
@@ -249,16 +306,13 @@ for m in messages:
 st.markdown("</div>", unsafe_allow_html=True)
 
 # ----------------------------
-# Input fixo no rodapé
+# Input (form)
 # ----------------------------
-
 with st.form("chat_form", clear_on_submit=True):
     user_text = st.text_area("Mensagem", placeholder="Digite sua mensagem...", label_visibility="collapsed", height=70)
     col1, col2 = st.columns([6, 1])
     with col2:
         send = st.form_submit_button("Enviar")
-
-st.markdown("</div></div>", unsafe_allow_html=True)
 
 # ----------------------------
 # "IA" de exemplo (placeholder)
@@ -273,12 +327,25 @@ def fake_assistant_reply(text: str) -> str:
 if st.session_state.pending_user_message.strip():
     injected = st.session_state.pending_user_message.strip()
     st.session_state.pending_user_message = ""
-    st.session_state.chats[st.session_state.active_chat].append({"role": "user", "content": injected})
-    st.session_state.chats[st.session_state.active_chat].append({"role": "assistant", "content": fake_assistant_reply(injected)})
+
+    active_before = st.session_state.active_chat
+    st.session_state.chats[active_before].append({"role": "user", "content": injected})
+
+    active_after = maybe_autoname_chat(active_before, injected)
+    st.session_state.chats[active_after].append({"role": "assistant", "content": fake_assistant_reply(injected)})
+
+    bump_chat_to_top(active_after)
     st.rerun()
 
-# 2) Envio normal pelo input do rodapé
+# 2) Envio normal pelo input
 if send and user_text.strip():
-    st.session_state.chats[st.session_state.active_chat].append({"role": "user", "content": user_text.strip()})
-    st.session_state.chats[st.session_state.active_chat].append({"role": "assistant", "content": fake_assistant_reply(user_text.strip())})
+    txt = user_text.strip()
+    active_before = st.session_state.active_chat
+
+    st.session_state.chats[active_before].append({"role": "user", "content": txt})
+
+    active_after = maybe_autoname_chat(active_before, txt)
+    st.session_state.chats[active_after].append({"role": "assistant", "content": fake_assistant_reply(txt)})
+
+    bump_chat_to_top(active_after)
     st.rerun()
